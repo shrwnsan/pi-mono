@@ -20,6 +20,24 @@ This PRD outlines the security hardening initiative for the pi-mono AI agent fra
 - **HIGH**: Prompt injection vulnerabilities
 - **HIGH**: SSH remote execution risks
 
+### **Security Assessment Update (November 14, 2025)**
+**Status**: **PRODUCTION DEPLOYMENT NOT RECOMMENDED**
+
+**Confirmed Critical Vulnerabilities**:
+- `packages/coding-agent/src/tools/read.ts:60,86-87` - Unrestricted file access with path traversal
+- `packages/coding-agent/src/tools/write.ts:32,58,66` - Unrestricted file write capabilities
+- `packages/coding-agent/src/tools/edit.ts:132,161,176,218` - Unrestricted file modification
+- `packages/coding-agent/src/tools/bash.ts:82-84` - Direct shell command execution with no validation
+- `packages/web-ui/src/storage/stores/provider-keys-store.ts:18-19` - Client-side API key storage
+- `packages/ai/src/providers/anthropic.ts:115,285-322` - Browser API key exposure
+- `packages/pods/src/ssh.ts:12-32,68-98` - SSH execution without host key verification
+
+**Attack Scenarios Confirmed**:
+- AI can read `/etc/passwd`, `~/.ssh/id_rsa`, API credentials
+- AI can execute `rm -rf /`, install malware, establish backdoors
+- API keys accessible to malicious browser extensions
+- SSH command injection and man-in-the-middle attacks
+
 ### Impact
 - **Production Deployment Risk**: System compromise through malicious AI instructions
 - **Data Security**: Potential exposure of sensitive data and API keys
@@ -42,6 +60,19 @@ This PRD outlines the security hardening initiative for the pi-mono AI agent fra
 - Comprehensive audit trail for all security-sensitive operations
 - Pass enterprise security review (SOC2 compliance ready)
 
+### **Security Assessment Baseline**
+**Current State** (November 14, 2025):
+- **Critical Vulnerabilities**: 7 confirmed
+- **Production Ready**: NO
+- **Security Test Coverage**: <5%
+- **Compliance Status**: Non-compliant
+
+**Target State**:
+- **Critical Vulnerabilities**: 0
+- **Production Ready**: YES
+- **Security Test Coverage**: >95%
+- **Compliance Status**: SOC2 Ready
+
 ## Technical Requirements
 
 ### 1. File System Security
@@ -55,6 +86,17 @@ This PRD outlines the security hardening initiative for the pi-mono AI agent fra
 - Read/write quotas and monitoring
 - Content scanning for malicious patterns
 
+****Specific Vulnerabilities to Address**:
+- `read.ts:60,86-87` - Replace unrestricted `resolvePath()` and `access()` calls
+- `write.ts:32,58,66` - Replace unrestricted `writeFile()` calls
+- `edit.ts:132,161,176,218` - Replace unrestricted file modification operations
+- `bash.ts` - Remove file operation capabilities from bash tool
+
+**Current Risk Assessment**:
+- **Severity**: CRITICAL
+- **Exploitability**: HIGH - AI can access any system file
+- **Impact**: COMPLETE - System compromise, data theft, credential exposure
+
 ### 2. Command Execution Security
 **Priority**: Critical
 **Description**: Secure shell command execution with proper filtering and isolation.
@@ -66,6 +108,16 @@ This PRD outlines the security hardening initiative for the pi-mono AI agent fra
 - Command logging and audit trails
 - Process isolation and cleanup
 
+**Specific Vulnerabilities to Address**:
+- `bash.ts:82-84` - Replace direct `spawn()` calls with validation and filtering
+- Remove all unrestricted shell access capabilities
+- Implement argument sanitization before execution
+
+**Current Risk Assessment**:
+- **Severity**: CRITICAL
+- **Exploitability**: HIGH - AI can execute any shell command
+- **Impact**: COMPLETE - Remote code execution, system takeover, malware installation
+
 ### 3. API Key Management
 **Priority**: High
 **Description**: Secure API key handling and storage.
@@ -75,7 +127,64 @@ This PRD outlines the security hardening initiative for the pi-mono AI agent fra
 - Short-lived token system with automatic rotation
 - Key usage monitoring and anomaly detection
 - Secure key vault integration
-- Environment-based key management
+- **Environment-based key management** (recommended approach)
+
+**Implementation Strategy - Environment Variables**:
+- **Primary Approach**: AI agent derives API keys from secure environment variables
+- **Benefits**: No client-side exposure, server-side only access, easy rotation
+- **Implementation**:
+  - Server loads keys from `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.
+  - AI agent requests API access through server-side proxy
+  - No keys ever transmitted to or stored in browser
+
+**Specific Vulnerabilities to Address**:
+- `provider-keys-store.ts:18-19` - Remove client-side API key storage from browser
+- `anthropic.ts:115,285-322` - Remove `dangerouslyAllowBrowser: true` and client-side key handling
+- Implement server-side proxy architecture for all external API calls
+- **Replace with environment variable loading on server-side**
+
+**Current Risk Assessment**:
+- **Severity**: HIGH
+- **Exploitability**: MEDIUM - Requires browser compromise or XSS
+- **Impact**: HIGH - API credential theft, unauthorized usage, financial loss
+
+**Environment Variable Security Benefits**:
+- ✅ **Zero Client Exposure**: Keys never reach browser
+- ✅ **Server-Side Only**: Keys loaded in secure server environment
+- ✅ **Easy Rotation**: Simple env var updates without code changes
+- ✅ **Audit Trail**: Server logs all API usage with key identification
+- ✅ **Access Control**: OS-level permissions on environment variables
+
+### **Security Comparison: Current vs Environment Variable Approach**
+
+| Security Aspect | Current Implementation | Environment Variable Approach |
+|----------------|----------------------|-------------------------------|
+| **Client Storage** | ❌ Browser IndexedDB/localStorage | ✅ None - server only |
+| **Browser Exposure** | ❌ `dangerouslyAllowBrowser: true` | ✅ Zero exposure |
+| **XSS Risk** | ❌ Keys stealable via JavaScript | ✅ No keys in browser to steal |
+| **Malicious Extensions** | ❌ Access to stored keys | ✅ No access to keys |
+| **Network Transmission** | ❌ Keys sent to client | ✅ Keys never leave server |
+| **Audit Trail** | ❌ Client-side usage hard to track | ✅ Server logs all API calls |
+| **Key Rotation** | ❌ Requires client updates | ✅ Simple env var change |
+| **Development Setup** | ❌ Manual key entry per session | ✅ Set once in environment |
+| **Production Deployment** | ❌ High risk exposure | ✅ Enterprise-grade security |
+
+### **Implementation Architecture**
+
+```typescript
+// Current (VULNERABLE)
+Browser --> Direct API Call with API Key
+    ↓
+❌ API Key stored in browser
+❌ dangerouslyAllowBrowser: true
+❌ Keys exposed to JavaScript
+
+// Environment Variable Approach (SECURE)
+Browser --> Server Proxy --> External API
+    ↓                    ↓
+✅ No API keys         ✅ Keys loaded from env vars
+✅ Server-side only    ✅ Audit logging
+```
 
 ### 4. Input Validation & Sanitization
 **Priority**: High
@@ -203,17 +312,51 @@ This PRD outlines the security hardening initiative for the pi-mono AI agent fra
 - Third-party security tools and libraries
 - Cloud provider security services
 
+## **Incident Response Procedures**
+
+### **IMMEDIATE ACTIONS REQUIRED**
+**Status**: PRODUCTION DEPLOYMENT MUST BE HALTED
+
+1. **Stop All Production Deployment**: Immediate halt to any production deployment plans
+2. **Isolate Affected Systems**: If deployed, isolate systems from network
+3. **Audit Access Logs**: Review logs for any suspicious AI activities
+4. **Rotate All API Keys**: Assume all stored keys may be compromised
+5. **Security Assessment**: Conduct full penetration testing before any deployment
+
+### **Compromise Indicators**
+- Unexplained file modifications in sensitive directories
+- Unexpected system command executions
+- API usage spikes or unusual patterns
+- SSH connections to unknown hosts
+- File access outside normal working directories
+
+### **Containment Strategies**
+- Disable AI agent capabilities until security hardening complete
+- Implement network-level filtering for external connections
+- Monitor all file system access for anomalous behavior
+- Enable comprehensive logging for security forensics
+
 ## Next Steps
 
-1. **Security Team Review**: Technical and business stakeholder approval
-2. **Resource Allocation**: Assign development team and security specialists
-3. **Infrastructure Setup**: Prepare development and testing environments
-4. **Implementation Kickoff**: Begin Phase 1 development tasks
+1. **EMERGENCY SECURITY TEAM MEETING**: Immediate review of critical vulnerabilities
+2. **Resource Allocation**: Assign senior developers to critical vulnerabilities (Week 1)
+3. **Development Environment Setup**: Prepare isolated development environments
+4. **Security Testing Framework**: Implement automated security testing in CI/CD
+5. **Implementation Kickoff**: Begin Phase 1 critical security tasks (IMMEDIATE)
+
+**⚠️ URGENT**: This is a CRITICAL security incident. All production activities must stop until vulnerabilities are remediated.
 
 ---
 
 **Document History**:
 - v1.0 (2025-11-13): Initial draft - Security Team
+- v1.1 (2025-11-14): Security assessment integration, specific vulnerability details, and environment variable API key strategy - Security Team
+
+**Security Review Status**:
+- **Code Review Completed**: ✅ November 14, 2025
+- **Critical Vulnerabilities Identified**: 7 confirmed
+- **Production Readiness**: ❌ NOT READY - Critical security issues
+- **Next Review**: Post-Phase 1 implementation (Target: November 21, 2025)
 
 **Approval**:
 - Security Lead: _________________________

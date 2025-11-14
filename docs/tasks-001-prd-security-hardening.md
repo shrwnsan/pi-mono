@@ -2,12 +2,24 @@
 
 **PRD Reference**: PRD-001-security-hardening.md
 **Created**: 2025-11-13
+**Updated**: 2025-11-14 (Security Assessment Integration)
 **Team**: Security Development Team
-**Status**: Ready for Assignment
+**Status**: Ready for Assignment - **URGENT**
 
 ## Overview
 
 This document breaks down the security hardening initiative into manageable tasks that can be worked on in parallel by junior developers. Each task includes detailed requirements, acceptance criteria, and implementation guidance.
+
+## **Security Assessment Summary (November 14, 2025)**
+**Production Status**: **NOT READY - 7 CRITICAL vulnerabilities confirmed**
+
+**Immediate Threats Identified**:
+- AI can read/write any system file (`/etc/passwd`, `~/.ssh/id_rsa`, API keys)
+- AI can execute any shell command (`rm -rf /`, malware installation)
+- API keys stored in browser with `dangerouslyAllowBrowser: true`
+- SSH operations without host key verification
+
+**Code Review References**: All task specifications include exact file paths and line numbers from security assessment.
 
 ## Phase 1: Critical Security Foundation (Weeks 1-2)
 
@@ -43,11 +55,24 @@ interface FilesystemSandbox {
 - enforceQuotas(): boolean
 ```
 
-**Files to Modify**:
+**Files to Modify** (Specific Lines from Security Assessment):
 - `packages/coding-agent/src/tools/read.ts`
+  - **Line 60**: Replace `const absolutePath = resolvePath(expandPath(path));`
+  - **Lines 86-87**: Replace unrestricted `await access(absolutePath, constants.R_OK);`
 - `packages/coding-agent/src/tools/write.ts`
+  - **Line 32**: Replace unrestricted path resolution
+  - **Lines 58, 66**: Replace `await writeFile(absolutePath, content, "utf-8");`
 - `packages/coding-agent/src/tools/edit.ts`
-- `packages/coding-agent/src/tools/bash.ts` (for file operations)
+  - **Lines 132, 161, 176, 218**: Replace unrestricted file modification operations
+- `packages/coding-agent/src/tools/bash.ts` (remove file operation capabilities)
+
+**Current Vulnerable Code Patterns**:
+```typescript
+// VULNERABLE: Direct file system access
+const absolutePath = resolvePath(expandPath(path));  // NO VALIDATION
+await access(absolutePath, constants.R_OK);          // UNRESTRICTED
+await writeFile(absolutePath, content, "utf-8");    // NO SANDBOX
+```
 
 **Acceptance Criteria**:
 - [ ] All file operations restricted to sandbox directory
@@ -99,10 +124,25 @@ interface CommandWhitelist {
 - enforceResourceLimits(process: ChildProcess): void
 ```
 
-**Files to Modify**:
+**Files to Modify** (Specific Lines from Security Assessment):
 - `packages/coding-agent/src/tools/bash.ts`
+  - **Lines 82-84**: Replace direct `spawn()` calls with validation
+  - **Current vulnerable code**:
+    ```typescript
+    const child = spawn(shell, [...args, command], {
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+    });
+    ```
 - Create: `packages/coding-agent/src/security/command-validator.ts`
 - Create: `packages/coding-agent/src/security/execution-sandbox.ts`
+
+**Critical Issues to Address**:
+- AI can execute ANY shell command including `rm -rf /`, `sudo su`
+- No command whitelisting or validation
+- No resource limits or timeouts
+- Unrestricted network access
+- No audit logging of executed commands
 
 **Acceptance Criteria**:
 - [ ] Only whitelisted commands can execute
@@ -185,50 +225,90 @@ interface ValidationRules {
 **Assignee**: Junior Developer 1
 **Dependencies**: Task 1.1, 1.2, 1.3
 
-**Description**: Create server-side API proxy to eliminate client-side API key storage.
+**Description**: Create server-side API proxy to eliminate client-side API key storage using environment variable approach.
 
 **Requirements**:
 - Build API proxy server for external API calls
-- Implement short-lived token system
+- **Implement environment variable-based key management**
 - Add request validation and rate limiting
-- Create secure key management system
+- Remove all client-side key storage mechanisms
 
 **Implementation Details**:
 ```typescript
+// Environment variable-based approach
+class EnvironmentKeyManager {
+  // Load keys from secure environment variables
+  private anthropicKey = process.env.ANTHROPIC_API_KEY;
+  private openaiKey = process.env.OPENAI_API_KEY;
+  private geminiKey = process.env.GEMINI_API_KEY;
+
+  // No client-side key storage - server only
+  getProviderKey(provider: string): string | null {
+    switch(provider) {
+      case 'anthropic': return this.anthropicKey;
+      case 'openai': return this.openaiKey;
+      case 'gemini': return this.geminiKey;
+      default: return null;
+    }
+  }
+}
+
 // API proxy interface
 interface APIProxy {
-  proxyRequest(endpoint: string, apiKey: string, request: any): Promise<any>;
+  proxyRequest(endpoint: string, provider: string, request: any): Promise<any>;
+  // No apiKey parameter - keys loaded from environment
   generateShortLivedToken(userId: string): string;
   validateToken(token: string): boolean;
   enforceRateLimit(userId: string): boolean;
-}
-
-// Key management
-interface KeyManager {
-  storeKey(keyId: string, encryptedKey: string): void;
-  retrieveKey(keyId: string): string;
-  rotateKey(keyId: string): void;
 }
 ```
 
 **Files to Create**:
 - `packages/api-proxy/src/server.ts`
-- `packages/api-proxy/src/key-manager.ts`
+- `packages/api-proxy/src/environment-key-manager.ts` (NEW - env var approach)
 - `packages/api-proxy/src/token-manager.ts`
 - `packages/api-proxy/src/rate-limiter.ts`
+- `.env.example` (template for required environment variables)
 
-**Files to Modify**:
-- `packages/web-ui/src/storage/stores/provider-keys-store.ts`
-- `packages/ai/src/anthropic.ts`
-- `packages/agent/src/api-clients/`
+**Files to Modify** (Specific Lines from Security Assessment):
+- `packages/web-ui/src/storage/stores/provider-keys-store.ts` (**DELETE or replace with proxy client**)
+  - **Lines 18-19**: Remove client-side API key storage entirely
+  - **Current vulnerable code**: `await this.getBackend().set("provider-keys", provider, key);`
+- `packages/ai/src/providers/anthropic.ts`
+  - **Lines 115, 285-322**: Remove `dangerouslyAllowBrowser: true`
+  - **Remove all client-side API key handling**
+- `packages/agent/src/api-clients/` (update to use server-side proxy)
+
+**Critical Security Issues to Address**:
+- ❌ **API keys stored in browser IndexedDB/localStorage** → ✅ **Environment variables on server**
+- ❌ **Keys accessible to malicious browser extensions** → ✅ **Zero client exposure**
+- ❌ **dangerouslyAllowBrowser: true** → ✅ **Server-side proxy only**
+- ❌ **No server-side proxy implementation** → ✅ **Full proxy implementation**
+- ❌ **Keys transmitted in plain text to client** → ✅ **Keys never reach client**
+
+**Environment Variable Setup**:
+```bash
+# Required environment variables
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+GEMINI_API_KEY=AIza...
+
+# Security settings
+API_PROXY_PORT=3001
+JWT_SECRET=your-jwt-secret
+RATE_LIMIT_REQUESTS=100
+RATE_LIMIT_WINDOW=900000
+```
 
 **Acceptance Criteria**:
-- [ ] API keys never exposed to client-side
-- [ ] Short-lived tokens working with automatic expiry
-- [ ] Rate limiting enforced per user/token
-- [ ] All API calls logged and monitored
-- [ ] Secure key storage with encryption
-- [ ] Backup and recovery procedures
+- [ ] **API keys loaded ONLY from environment variables**
+- [ ] **Zero client-side key storage** (delete provider-keys-store.ts)
+- [ ] **Remove dangerouslyAllowBrowser: true from all providers**
+- [ ] **Server-side proxy handles all external API calls**
+- [ ] **Rate limiting enforced per user/token**
+- [ ] **All API calls logged with key identification**
+- [ ] **Environment variable validation on startup**
+- [ ] **Fallback handling for missing environment variables**
 
 ---
 
@@ -257,10 +337,20 @@ interface SSHSecurity {
 }
 ```
 
-**Files to Modify**:
+**Files to Modify** (Specific Lines from Security Assessment):
 - `packages/pods/src/ssh.ts`
+  - **Lines 12-32**: Replace `const sshParts = sshCmd.split(" ").filter((p) => p);`
+  - **Lines 68-98**: Replace unrestricted `spawn(sshBinary, sshArgs, { stdio: ["ignore", "pipe", "pipe"] });`
+  - **Current vulnerable code**: No host key verification, command injection possible
 - Create: `packages/pods/src/ssh-security.ts`
 - Create: `packages/pods/src/host-key-verifier.ts`
+
+**Critical Security Issues**:
+- SSH commands executed without host key verification (man-in-the-middle possible)
+- Command injection through SSH command parsing
+- No session isolation or monitoring
+- Unrestricted file transfer capabilities
+- No audit trail of SSH operations
 
 **Acceptance Criteria**:
 - [ ] SSH host key verification mandatory
@@ -401,17 +491,34 @@ interface SSHSecurity {
 
 ---
 
+## **URGENT Implementation Priority Matrix**
+
+### **CRITICAL (Week 1 - Block Production)**
+| Vulnerability | File | Lines | Risk | Developer |
+|---------------|------|-------|------|-----------|
+| Unrestricted file access | `read.ts` | 60,86-87 | CRITICAL | Sr Dev 1 |
+| Unrestricted file write | `write.ts` | 32,58,66 | CRITICAL | Sr Dev 1 |
+| Unrestricted file edit | `edit.ts` | 132,161,176,218 | CRITICAL | Sr Dev 1 |
+| Direct command execution | `bash.ts` | 82-84 | CRITICAL | Sr Dev 2 |
+
+### **HIGH (Week 2)**
+| Vulnerability | File | Lines | Risk | Developer |
+|---------------|------|-------|------|-----------|
+| Client-side API keys | `provider-keys-store.ts` | 18-19 | HIGH | Jr Dev 1 |
+| Browser key exposure | `anthropic.ts` | 115,285-322 | HIGH | Jr Dev 1 |
+| SSH no host verification | `ssh.ts` | 12-32,68-98 | HIGH | Jr Dev 2 |
+
 ## Task Assignment Matrix
 
-| Task | Developer | Week | Dependencies |
-|------|-----------|------|--------------|
-| 1.1 | Jr Dev 1 | 1 | None |
-| 1.2 | Jr Dev 2 | 1 | None |
-| 1.3 | Jr Dev 3 | 1 | None |
-| 2.1 | Jr Dev 1 | 3 | 1.1, 1.2, 1.3 |
-| 2.2 | Jr Dev 2 | 3 | 1.2, 1.3 |
-| 3.1 | Jr Dev 3 | 5 | 1.3, 2.1 |
-| 3.2 | Jr Dev 1 | 5 | All previous |
+| Task | Developer | Week | Dependencies | Priority |
+|------|-----------|------|--------------|----------|
+| 1.1 | Sr Dev 1 | 1 | None | CRITICAL |
+| 1.2 | Sr Dev 2 | 1 | None | CRITICAL |
+| 1.3 | Jr Dev 3 | 1 | None | HIGH |
+| 2.1 | Jr Dev 1 | 2 | 1.1, 1.2, 1.3 | HIGH |
+| 2.2 | Jr Dev 2 | 2 | 1.2, 1.3 | HIGH |
+| 3.1 | Jr Dev 3 | 3 | 1.3, 2.1 | MEDIUM |
+| 3.2 | Sr Dev 1 | 3 | All previous | MEDIUM |
 
 ## Risk Mitigation
 
@@ -429,6 +536,7 @@ interface SSHSecurity {
 
 **Document History**:
 - v1.0 (2025-11-13): Initial task breakdown - Security Team
+- v1.1 (2025-11-14): Security assessment integration, specific implementation details with file paths and line numbers, environment variable API key strategy, urgent priority matrix - Security Team
 
 **Contact Information**:
 - Tech Lead: _________________________
